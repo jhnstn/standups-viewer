@@ -222,13 +222,24 @@ final class Store: ObservableObject {
         let tools = (["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Skill", "ToolSearch", "Agent"] + extra)
             .joined(separator: ",")
         let prompt = updating ? "/standup update" : "/standup"
-        // default mode: exactly the allowlisted tools run, with no auto-mode classifier in the loop
-        // (headless auto mode was refusing to launch the watercooler agent).
-        let cmd = "claude -p '\(prompt)' --permission-mode default --allowedTools '\(tools)' --output-format text"
+        guard let env = Store.shellEnvironment(), let claude = Store.findClaude(path: env["PATH"] ?? "") else {
+            isGenerating = false
+            statusText = "claude not found"
+            errorText = """
+            Could not find the claude CLI. The app looked on the PATH your shell sets up \
+            (zsh -lic), then in ~/.local/bin, /opt/homebrew/bin and /usr/local/bin.
+
+            If it lives somewhere else, point the app at it:
+            defaults write com.jhnstn.standups ClaudePath /full/path/to/claude
+            """
+            return
+        }
 
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        p.arguments = ["-lc", cmd]
+        p.executableURL = claude
+        // default mode: exactly the allowlisted tools run, with no auto-mode classifier in the loop.
+        p.arguments = ["-p", prompt, "--permission-mode", "default", "--allowedTools", tools, "--output-format", "text"]
+        p.environment = env
         p.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
         let pipe = Pipe()
         p.standardOutput = pipe
@@ -273,6 +284,52 @@ final class Store: ObservableObject {
             isGenerating = false
             errorText = "Could not start claude: \(error.localizedDescription)"
         }
+    }
+
+    /// The environment an interactive login zsh ends up with, so PATH includes whatever
+    /// ~/.zshrc adds (apps launched from Finder only get a minimal PATH). Cached after first use.
+    private static var cachedEnv: [String: String]?
+    static func shellEnvironment() -> [String: String]? {
+        if let cachedEnv { return cachedEnv }
+        var env = ProcessInfo.processInfo.environment
+        let marker = "__STANDUPS_PATH__"
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        // -i so .zshrc runs; the marker separates PATH from anything the rc files print.
+        p.arguments = ["-lic", "print -r -- \(marker)$PATH\(marker)"]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        p.standardInput = FileHandle.nullDevice
+        if (try? p.run()) != nil {
+            let deadline = Date().addingTimeInterval(10)
+            while p.isRunning && Date() < deadline { usleep(50_000) }
+            if p.isRunning { p.terminate() }
+            let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let parts = text.components(separatedBy: marker)
+            if parts.count >= 3, !parts[1].isEmpty { env["PATH"] = parts[1] }
+        }
+        // Belt and braces: make sure the common tool locations are present either way.
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let extras = ["\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+        var path = (env["PATH"] ?? "").split(separator: ":").map(String.init)
+        for e in extras where !path.contains(e) { path.append(e) }
+        env["PATH"] = path.joined(separator: ":")
+        cachedEnv = env
+        return env
+    }
+
+    static func findClaude(path: String) -> URL? {
+        let fm = FileManager.default
+        if let custom = UserDefaults.standard.string(forKey: "ClaudePath"), !custom.isEmpty {
+            let expanded = (custom as NSString).expandingTildeInPath
+            return fm.isExecutableFile(atPath: expanded) ? URL(fileURLWithPath: expanded) : nil
+        }
+        for dir in path.split(separator: ":") {
+            let candidate = "\(dir)/claude"
+            if fm.isExecutableFile(atPath: candidate) { return URL(fileURLWithPath: candidate) }
+        }
+        return nil
     }
 
     func cancelGeneration() {

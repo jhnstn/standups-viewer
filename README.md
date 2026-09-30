@@ -44,8 +44,14 @@ defaults write com.jhnstn.standups ExtraAllowedTools -array "mcp__myserver__sear
 
 The headless run uses `--permission-mode default` with an explicit allowlist:
 Bash, Read, Write, Edit, Glob, Grep, Skill, ToolSearch, Agent, plus the extras above.
-`claude` is resolved through your login shell, so it must be on the PATH your
-`~/.zprofile` / `~/.zshrc` sets up.
+`claude` is looked up on the PATH an interactive login zsh builds (so anything
+`~/.zshrc` adds counts), then in `~/.local/bin`, `/opt/homebrew/bin` and
+`/usr/local/bin`. The run gets that same PATH, so tools your skill shells out
+to resolve as they do in your terminal. To point at a specific binary:
+
+```sh
+defaults write com.jhnstn.standups ClaudePath /full/path/to/claude
+```
 
 ## Credits
 
